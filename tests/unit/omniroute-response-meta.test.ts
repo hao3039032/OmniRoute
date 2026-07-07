@@ -7,6 +7,7 @@ import {
   buildOmniRouteSseMetadataComment,
   formatOmniRouteCost,
   getOmniRouteTokenCounts,
+  shouldInjectOmniRouteSseMetadataComment,
 } from "../../src/domain/omnirouteResponseMeta.ts";
 import { APP_CONFIG } from "../../src/shared/constants/appConfig.ts";
 import { OMNIROUTE_RESPONSE_HEADERS } from "../../src/shared/constants/headers.ts";
@@ -133,6 +134,13 @@ test("attachOmniRouteMetaHeaders mutates a plain record in place, preserving exi
   assert.equal(headers[OMNIROUTE_RESPONSE_HEADERS.model], "gpt");
   // No requestId provided → header omitted.
   assert.equal(headers[OMNIROUTE_RESPONSE_HEADERS.requestId], undefined);
+});
+
+test("shouldInjectOmniRouteSseMetadataComment skips Cursor clients", () => {
+  assert.equal(shouldInjectOmniRouteSseMetadataComment("Cursor/1.0"), false);
+  assert.equal(shouldInjectOmniRouteSseMetadataComment("Mozilla/5.0 Cursor/2.0"), false);
+  assert.equal(shouldInjectOmniRouteSseMetadataComment("claude-cli/1.0"), true);
+  assert.equal(shouldInjectOmniRouteSseMetadataComment(null), true);
 });
 
 test("buildOmniRouteSseMetadataComment emits comment lines compatible with SSE", () => {

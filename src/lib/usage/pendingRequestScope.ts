@@ -8,6 +8,7 @@ import {
 
 export type PendingRequestScope = {
   id: string | null | undefined;
+  ioDumpRequestId?: string | null;
   model: string;
   provider: string;
   connectionId: string | null;

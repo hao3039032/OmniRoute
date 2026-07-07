@@ -145,6 +145,19 @@ export function buildOmniRouteResponseMetaHeaders({
   return headers;
 }
 
+/**
+ * Whether to inject `: x-omniroute-*` SSE comment lines before `data: [DONE]`.
+ * Cursor's OpenAI-compatible client mishandles non-standard SSE comments after
+ * tool-call chunks, breaking the follow-up tool-round request. HTTP response
+ * headers still carry the same telemetry.
+ */
+export function shouldInjectOmniRouteSseMetadataComment(
+  userAgent: string | null | undefined
+): boolean {
+  if (!userAgent || typeof userAgent !== "string") return true;
+  return !/\bcursor\b/i.test(userAgent);
+}
+
 export function buildOmniRouteSseMetadataComment(
   options: Parameters<typeof buildOmniRouteResponseMetaHeaders>[0]
 ): string {

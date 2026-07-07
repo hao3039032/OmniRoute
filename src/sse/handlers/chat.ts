@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import { resolveChatRequestBody } from "./requestBody";
+import { dumpIoParseFailure, finalizeIoDump, isIoDumpEnabled } from "@omniroute/open-sse/utils/ioDump.ts";
 import { normalizeReasoningRequest } from "@/shared/reasoning/effortStandardization";
 import { resolveRoutingModel } from "./resolveRoutingModel";
 import {
@@ -228,6 +229,15 @@ export async function handleChat(
     body = await resolveChatRequestBody(request, preParsedBody);
     telemetry.endPhase();
   } catch {
+    if (isIoDumpEnabled()) {
+      let rawText = "";
+      try {
+        rawText = await request.clone().text();
+      } catch {
+        // best-effort raw capture for malformed bodies
+      }
+      dumpIoParseFailure(reqId, rawText, Object.fromEntries(request.headers.entries()));
+    }
     log.warn("CHAT", "Invalid JSON body");
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid JSON body");
   }

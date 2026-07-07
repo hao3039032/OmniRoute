@@ -21,7 +21,10 @@ import {
   unwrapGeminiChunk,
 } from "./streamHelpers.ts";
 import { calculateCost } from "@/lib/usage/costCalculator";
-import { buildOmniRouteSseMetadataComment } from "@/domain/omnirouteResponseMeta";
+import {
+  buildOmniRouteSseMetadataComment,
+  shouldInjectOmniRouteSseMetadataComment,
+} from "@/domain/omnirouteResponseMeta";
 import {
   createStructuredSSECollector,
   buildStreamSummaryFromEvents,
@@ -55,6 +58,7 @@ import {
   getUnsupportedReasoningValue,
   hasUnsupportedReasoningSignal,
 } from "./reasoningFields.ts";
+import { finalizeIoDump, isIoDumpEnabled } from "./ioDump.ts";
 
 /**
  * Race a response body read against a timeout.
@@ -92,6 +96,7 @@ type StreamLogger = {
   appendProviderChunk?: (value: string) => void;
   appendConvertedChunk?: (value: string) => void;
   appendOpenAIChunk?: (value: string) => void;
+  requestId?: string | null;
 };
 
 type StreamCompletePayload = {
@@ -136,6 +141,8 @@ type StreamOptions = {
   body?: unknown;
   onComplete?: ((payload: StreamCompletePayload) => void) | null;
   onFailure?: ((payload: StreamFailurePayload) => boolean | void | Promise<void>) | null;
+  /** Inbound client User-Agent — used to skip SSE metadata comments for incompatible clients. */
+  clientUserAgent?: string | null;
 };
 
 type TranslateState = ReturnType<typeof initState> & {
@@ -630,8 +637,12 @@ export function createSSEStream(options: StreamOptions = {}) {
     onComplete = null,
     onFailure = null,
     dropResponsesCommentary,
+    clientUserAgent = null,
   } = options;
+  const injectSseMetadataComment = shouldInjectOmniRouteSseMetadataComment(clientUserAgent);
   const signatureNamespace = connectionId;
+  const dumpRequestId =
+    isIoDumpEnabled() && reqLogger?.requestId ? String(reqLogger.requestId) : null;
 
   // Drop internal commentary-phase Responses output before forwarding (#6199).
   // Explicit option wins; otherwise read the feature flag (default on). Resolved
@@ -958,6 +969,28 @@ export function createSSEStream(options: StreamOptions = {}) {
     controller: TransformStreamDefaultController,
     finalUsage: UsageTokenRecord | Record<string, unknown> | null | undefined
   ) => {
+    if (!injectSseMetadataComment) {
+      // #region agent log
+      fetch("http://127.0.0.1:7296/ingest/675e38f5-7d49-4f89-8bb2-5ded82773c09", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "b1de6e" },
+        body: JSON.stringify({
+          sessionId: "b1de6e",
+          runId: "cursor-sse-fix",
+          hypothesisId: "H1",
+          location: "open-sse/utils/stream.ts:emitFinalSseMetadata",
+          message: "skipped_sse_metadata_comment_for_cursor",
+          data: {
+            clientUserAgent: clientUserAgent ? clientUserAgent.slice(0, 80) : null,
+            provider,
+            model,
+          },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
+      return;
+    }
     const costUsd = finalUsage ? await calculateCost(provider, model, finalUsage) : 0;
     const comment = buildOmniRouteSseMetadataComment({
       provider,
@@ -1873,10 +1906,36 @@ export function createSSEStream(options: StreamOptions = {}) {
                     usage = estimated;
                     injectedUsage = true;
                   } else if (isFinishChunk && usage) {
-                    const buffered = addBufferToUsage(usage);
-                    parsed.usage = filterUsageForFormat(buffered, FORMATS.OPENAI);
-                    output = `data: ${JSON.stringify(parsed)}\n\n`;
-                    injectedUsage = true;
+                    if (!injectSseMetadataComment && hasValidUsage(parsed.usage)) {
+                      // Cursor against GLM direct-style streams: forwarding rewritten usage
+                      // (+buffer tokens, flattened cached/reasoning fields) breaks the
+                      // tool-round follow-up. Keep the sanitized provider usage object.
+                      // #region agent log
+                      fetch("http://127.0.0.1:7296/ingest/675e38f5-7d49-4f89-8bb2-5ded82773c09", {
+                        method: "POST",
+                        headers: {
+                          "Content-Type": "application/json",
+                          "X-Debug-Session-Id": "b1de6e",
+                        },
+                        body: JSON.stringify({
+                          sessionId: "b1de6e",
+                          runId: "cursor-usage-passthrough",
+                          hypothesisId: "H3",
+                          location: "open-sse/utils/stream.ts:finishUsage",
+                          message: "cursor_passthrough_provider_usage",
+                          data: { provider, model },
+                          timestamp: Date.now(),
+                        }),
+                      }).catch(() => {});
+                      // #endregion
+                      output = `data: ${JSON.stringify(parsed)}\n\n`;
+                      injectedUsage = true;
+                    } else {
+                      const buffered = addBufferToUsage(usage);
+                      parsed.usage = filterUsageForFormat(buffered, FORMATS.OPENAI);
+                      output = `data: ${JSON.stringify(parsed)}\n\n`;
+                      injectedUsage = true;
+                    }
                   } else if (textualToolCallConverted) {
                     output = `data: ${JSON.stringify(parsed)}\n\n`;
                     injectedUsage = true;
@@ -2716,6 +2775,15 @@ export function createSSEStream(options: StreamOptions = {}) {
           }
         } catch (error) {
           console.log(`[STREAM] Error in flush (${model || "unknown"}):`, error.message || error);
+        } finally {
+          if (dumpRequestId) {
+            finalizeIoDump(dumpRequestId, {
+              provider,
+              model,
+              mode,
+              streamTimedOut,
+            });
+          }
         }
       },
       cancel(reason) {
@@ -2743,7 +2811,8 @@ export function createSSETransformStreamWithLogger(
   apiKeyInfo: unknown = null,
   onFailure: ((payload: StreamFailurePayload) => void | Promise<void>) | null = null,
   copilotCompatibleReasoning = false,
-  suppressThinkClose = false
+  suppressThinkClose = false,
+  clientUserAgent: string | null = null
 ) {
   return createSSEStream({
     mode: STREAM_MODE.TRANSLATE,
@@ -2760,6 +2829,7 @@ export function createSSETransformStreamWithLogger(
     onFailure,
     copilotCompatibleReasoning,
     suppressThinkClose,
+    clientUserAgent,
   });
 }
 
@@ -2773,7 +2843,8 @@ export function createPassthroughStreamWithLogger(
   onComplete: ((payload: StreamCompletePayload) => void) | null = null,
   apiKeyInfo: unknown = null,
   onFailure: ((payload: StreamFailurePayload) => void | Promise<void>) | null = null,
-  clientResponseFormat: string | null = null
+  clientResponseFormat: string | null = null,
+  clientUserAgent: string | null = null
 ) {
   return createSSEStream({
     mode: STREAM_MODE.PASSTHROUGH,
@@ -2787,5 +2858,6 @@ export function createPassthroughStreamWithLogger(
     onComplete,
     onFailure,
     clientResponseFormat,
+    clientUserAgent,
   });
 }

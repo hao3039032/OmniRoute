@@ -722,6 +722,7 @@ export async function handleChatCore({
       stage: "registered",
       correlationId,
     }) || generateRequestId();
+  const ioDumpRequestId = correlationId || pendingRequestId;
 
   // Initialize rate limit settings from persisted DB (once, lazy)
   await initializeRateLimits();
@@ -911,12 +912,18 @@ export async function handleChatCore({
     enabled: detailedLoggingEnabled,
     captureStreamChunks: capturePipelineStreamChunks,
     maxStreamChunkBytes: getCallLogPipelineMaxSizeBytes(),
-    requestId: pendingRequestId,
+    requestId: ioDumpRequestId,
     model,
     provider: provider || undefined,
     connectionId: connectionId || credentials?.connectionId || undefined,
   });
-  const pendingScope = { id: pendingRequestId, model, provider, connectionId: pendingConnId };
+  const pendingScope = {
+    id: pendingRequestId,
+    ioDumpRequestId,
+    model,
+    provider,
+    connectionId: pendingConnId,
+  };
   const providerRequestCapture = createPreparedRequestLogger(reqLogger, pendingScope);
   // 0. Log client raw request (before format conversion)
   if (clientRawRequest) {
@@ -4377,7 +4384,9 @@ export async function handleChatCore({
       onStreamComplete,
       apiKeyInfo,
       handleStreamFailure,
-      copilotCompatibleReasoning
+      copilotCompatibleReasoning,
+      false,
+      streamUserAgent
     );
   } else if (needsTranslation(targetFormat, clientResponseFormat)) {
     // Standard translation for other providers
@@ -4402,7 +4411,8 @@ export async function handleChatCore({
       resolveSuppressThinkClose({
         userAgent: streamUserAgent,
         thinkingMarkerHeader,
-      })
+      }),
+      streamUserAgent
     );
   } else {
     log?.debug?.("STREAM", `Standard passthrough mode`);
@@ -4416,7 +4426,8 @@ export async function handleChatCore({
       onStreamComplete,
       apiKeyInfo,
       handleStreamFailure,
-      clientResponseFormat
+      clientResponseFormat,
+      streamUserAgent
     );
   }
 

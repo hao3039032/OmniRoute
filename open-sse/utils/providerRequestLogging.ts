@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import { updatePendingScope, type PendingRequestScope } from "@/lib/usage/pendingRequestScope";
+import { isIoDumpEnabled, recordIoDumpProviderRequest } from "@omniroute/open-sse/utils/ioDump.ts";
 
 export type ProviderRequestPrepared = {
   url: string;
@@ -227,6 +228,14 @@ export function createPreparedRequestLogger(
     capture(request) {
       latest = request;
       reqLogger.logTargetRequest(request.url, request.headers, request.body);
+      if (isIoDumpEnabled()) {
+        recordIoDumpProviderRequest(scope.ioDumpRequestId || scope.id, {
+          url: request.url,
+          headers: request.headers,
+          body: request.body,
+          bodyString: request.bodyString,
+        });
+      }
       updatePendingScope(scope, {
         providerRequest: request.body,
         providerUrl: request.url,

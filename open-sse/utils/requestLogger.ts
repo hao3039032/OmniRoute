@@ -1,4 +1,10 @@
 import { getPendingById } from "@/lib/usage/usageHistory";
+import {
+  appendIoDumpClientWire,
+  appendIoDumpProviderWire,
+  isIoDumpEnabled,
+  recordIoDumpProviderRequest,
+} from "./ioDump.ts";
 import { sanitizeErrorMessage } from "./error.ts";
 
 type JsonRecord = Record<string, unknown>;
@@ -26,6 +32,7 @@ export type RequestPipelinePayloads = {
 
 type RequestLogger = {
   sessionPath: null;
+  requestId?: string | null;
   logClientRawRequest: (endpoint: unknown, body: unknown, headers?: HeaderInput) => void;
   logOpenAIRequest: (body: unknown) => void;
   logTargetRequest: (url: unknown, headers: HeaderInput, body: unknown) => void;
@@ -274,16 +281,24 @@ function makeStreamChunkMethods(options: RequestLoggerOptions, captureChunks: bo
     appendBoundedChunk(arr, bytes, `[${ts}] ${chunk}`, maxBytes, maxItems);
   };
 
+  const dumpRequestId = options.requestId ?? null;
+
   return {
     streamChunks,
     streamChunkBytes,
     appendProviderChunk(chunk: string) {
+      if (dumpRequestId && isIoDumpEnabled()) {
+        appendIoDumpProviderWire(dumpRequestId, chunk);
+      }
       append(streamChunks.provider, streamChunkBytes.provider, chunk);
     },
     appendOpenAIChunk(chunk: string) {
       append(streamChunks.openai, streamChunkBytes.openai, chunk);
     },
     appendConvertedChunk(chunk: string) {
+      if (dumpRequestId && isIoDumpEnabled()) {
+        appendIoDumpClientWire(dumpRequestId, chunk);
+      }
       append(streamChunks.client, streamChunkBytes.client, chunk);
     },
   };
@@ -304,6 +319,7 @@ export async function createRequestLogger(
   if (options.enabled === false) {
     return {
       sessionPath: null,
+      requestId: options.requestId ?? null,
       logClientRawRequest() {},
       logOpenAIRequest() {},
       logTargetRequest() {},
@@ -325,6 +341,7 @@ export async function createRequestLogger(
 
   return {
     sessionPath: null,
+    requestId: options.requestId ?? null,
 
     logClientRawRequest(endpoint, body, headers = {}) {
       payloads.clientRawRequest = {
@@ -349,6 +366,17 @@ export async function createRequestLogger(
         headers: maskSensitiveHeaders(headers),
         body: cloneBoundedForLog(body),
       };
+      if (options.requestId && isIoDumpEnabled()) {
+        const headerRecord =
+          headers instanceof Headers
+            ? Object.fromEntries(headers.entries())
+            : { ...(headers as Record<string, string>) };
+        recordIoDumpProviderRequest(options.requestId, {
+          url: String(url),
+          headers: headerRecord,
+          body,
+        });
+      }
     },
 
     logProviderResponse(status, statusText, headers, body) {

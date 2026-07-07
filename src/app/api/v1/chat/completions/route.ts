@@ -1,5 +1,4 @@
 import { CORS_HEADERS, handleCorsOptions } from "@/shared/utils/cors";
-import { callCloudWithMachineId } from "@/shared/utils/cloud";
 import { handleChat } from "@/sse/handlers/chat";
 import { generateRequestId } from "@/shared/utils/requestId";
 import { initTranslators } from "@omniroute/open-sse/translator/index.ts";
@@ -12,6 +11,13 @@ import {
   readCompressionRequestHeader,
   withCompressionHeaderEcho,
 } from "@/shared/utils/compressionHeaderEcho";
+import {
+  captureRouteRawBody,
+  dumpRouteRejection,
+  finalizeIoDump,
+  shouldDumpRequest,
+  startIoDump,
+} from "@omniroute/open-sse/utils/ioDump.ts";
 
 let initPromise = null;
 
@@ -44,20 +50,46 @@ export async function OPTIONS() {
 export async function POST(request) {
   await ensureInitialized();
 
+  const reqId = generateRequestId();
+  const dumpThis = shouldDumpRequest(request.headers);
+  let rawBodyText: string | null = null;
+  if (dumpThis) {
+    try {
+      rawBodyText = await captureRouteRawBody(request);
+    } catch {
+      rawBodyText = "";
+    }
+    startIoDump(reqId, {
+      path: "/v1/chat/completions",
+      headers: request.headers,
+      bodyRaw: rawBodyText ?? "",
+      captureSource: "chat-route-entry",
+    });
+  }
+
+  const rejectAndDump = (response: Response, stage: string, extra: Record<string, unknown> = {}) => {
+    if (dumpThis) dumpRouteRejection(reqId, stage, extra);
+    return response;
+  };
+
   // Content-Type guard (#6414) — reject non-JSON POST bodies with 415 per RFC 7231.
   // OpenAI/Anthropic reject `text/plain` or missing Content-Type at the edge; matching
   // that behavior prevents a text/plain body from silently reaching provider lookup.
   const contentType = request.headers.get("content-type") ?? "";
   if (!contentType.toLowerCase().split(";")[0].trim().startsWith("application/json")) {
-    return new Response(
-      JSON.stringify({
-        error: {
-          message: "Content-Type must be application/json",
-          type: "invalid_request_error",
-          code: "unsupported_media_type",
-        },
-      }),
-      { status: 415, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
+    return rejectAndDump(
+      new Response(
+        JSON.stringify({
+          error: {
+            message: "Content-Type must be application/json",
+            type: "invalid_request_error",
+            code: "unsupported_media_type",
+          },
+        }),
+        { status: 415, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
+      ),
+      "content_type_rejected",
+      { contentType, rawBytes: rawBodyText?.length ?? 0 }
     );
   }
 
@@ -68,7 +100,11 @@ export async function POST(request) {
   // whole process. Shedding the marginal request here turns a pod-wide crash into a single
   // client retry. Healthy heap (the normal case) admits every body untouched. (#5152)
   const admissionRejection = checkChatAdmission(request);
-  if (admissionRejection) return admissionRejection;
+  if (admissionRejection) {
+    return rejectAndDump(admissionRejection, "admission_rejected", {
+      rawBytes: rawBodyText?.length ?? 0,
+    });
+  }
 
   // One-line marker for diagnosing 413 / Server-Action interceptions.
   // Logs only when Content-Length is present so debug noise stays low for
@@ -92,21 +128,44 @@ export async function POST(request) {
     if (parsedBody) {
       const { blocked, result } = injectionGuard(parsedBody);
       if (blocked) {
-        return new Response(
-          JSON.stringify({
-            error: {
-              message: "Request blocked: potential prompt injection detected",
-              type: "injection_detected",
-              code: "SECURITY_001",
-              detections: result.detections.length,
-            },
-          }),
-          { status: 400, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
+        return rejectAndDump(
+          new Response(
+            JSON.stringify({
+              error: {
+                message: "Request blocked: potential prompt injection detected",
+                type: "injection_detected",
+                code: "SECURITY_001",
+                detections: result.detections.length,
+              },
+            }),
+            { status: 400, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
+          ),
+          "injection_blocked",
+          { detections: result.detections.length }
         );
       }
+    } else if (dumpThis) {
+      dumpRouteRejection(reqId, "route_json_parse_null", {
+        rawBytes: rawBodyText?.length ?? 0,
+      });
     }
   } catch (error) {
     console.error("[SECURITY] Prompt injection guard failed:", error);
+    if (dumpThis) {
+      dumpRouteRejection(reqId, "injection_guard_error", {
+        rawBytes: rawBodyText?.length ?? 0,
+      });
+    }
+  }
+
+  if (dumpThis && parsedBody != null) {
+    startIoDump(reqId, {
+      path: "/v1/chat/completions",
+      headers: request.headers,
+      body: parsedBody,
+      bodyRaw: rawBodyText ?? undefined,
+      captureSource: "chat-route-parsed",
+    });
   }
 
   // Gate the early SSE keepalive wrapper: only wrap when the client explicitly
@@ -126,7 +185,6 @@ export async function POST(request) {
   const compressionRequestHeader = readCompressionRequestHeader(request);
 
   if (wantsStreaming) {
-    const reqId = generateRequestId();
     const streamedResponse = await withEarlyStreamKeepalive(
       handleChat(request, null, parsedBody, reqId),
       {
@@ -138,8 +196,9 @@ export async function POST(request) {
     return withCompressionHeaderEcho(streamedResponse, compressionRequestHeader);
   }
 
-  return withCompressionHeaderEcho(
-    await handleChat(request, null, parsedBody),
-    compressionRequestHeader
-  );
+  const jsonResponse = await handleChat(request, null, parsedBody, dumpThis ? reqId : undefined);
+  if (dumpThis) {
+    finalizeIoDump(reqId, { stage: "non_stream_complete", reachedHandleChat: true });
+  }
+  return withCompressionHeaderEcho(jsonResponse, compressionRequestHeader);
 }

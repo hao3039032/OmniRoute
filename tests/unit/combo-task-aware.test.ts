@@ -426,4 +426,21 @@ describe("non-task-aware strategy guard", () => {
     const out = reorderByTaskWeight(targets, task, new Set());
     assert.strictEqual(out, targets);
   });
+
+  it("auto strategy pins the scored winner before task-route reordering", () => {
+    const glmCn = makeTarget("glm-cn/glm-5.2", 0);
+    const opencodeGo = makeTarget("opencode-go/glm-5.2", 1);
+    const orderedTargets = [glmCn, opencodeGo];
+    const task = classifyTask({ messages: [{ role: "user", content: "fix this code" }] });
+    const taskReordered = reorderByTaskWeight(orderedTargets, task, new Set());
+    const strategy = "auto";
+    const autoUsedExplicitRouter = false;
+    const pinnedFirst =
+      strategy === "auto" || autoUsedExplicitRouter ? orderedTargets[0] : undefined;
+    const nextOrder = pinnedFirst
+      ? [pinnedFirst, ...taskReordered.filter((t) => t !== pinnedFirst)]
+      : taskReordered;
+
+    assert.equal(nextOrder[0]?.modelStr, "glm-cn/glm-5.2");
+  });
 });

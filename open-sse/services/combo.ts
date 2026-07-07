@@ -1182,9 +1182,11 @@ export async function handleComboChat({
     // #4945 regression guard: when an explicit auto router (lkgp/cost/…) pinned
     // orderedTargets[0], keep that primary choice and let task-aware refine only
     // the fallback tail — otherwise task weighting silently defeats the operator's
-    // chosen LKGP/cost selection. reorderByTaskWeight returns the same target
-    // objects (no clone), so identity filtering is safe.
-    const pinnedFirst = autoUsedExplicitRouter ? orderedTargets[0] : undefined;
+    // chosen LKGP/cost selection. For the plain `auto` strategy, orderedTargets[0]
+    // is the scored winner from resolveAutoStrategy — pin it too so task-route does
+    // not override glm-cn (etc.) with a different provider on coding turns.
+    const pinnedFirst =
+      strategy === "auto" || autoUsedExplicitRouter ? orderedTargets[0] : undefined;
     const nextOrder = pinnedFirst
       ? [pinnedFirst, ...taskReordered.filter((t) => t !== pinnedFirst)]
       : taskReordered;

@@ -43,7 +43,18 @@ function isPublicCloudApiRoute(pathname: string, method: string): boolean {
   );
 }
 
+function isIoDumpInboundCaptureRoute(pathname: string, method: string): boolean {
+  if (pathname !== "/api/debug/inbound-capture") return false;
+  const normalizedMethod = String(method).toUpperCase();
+  if (normalizedMethod !== "POST" && normalizedMethod !== "OPTIONS") return false;
+  const flag = process.env.OMNIROUTE_IO_DUMP;
+  return flag === "1" || flag === "true";
+}
+
 export function isPublicApiRoute(pathname: string, method = "GET"): boolean {
+  if (isIoDumpInboundCaptureRoute(pathname, method)) {
+    return true;
+  }
   if (isPublicCloudApiRoute(pathname, method)) {
     return true;
   }
